@@ -7,12 +7,10 @@
  *  Author: karthik
  */ 
 
-#include <inttypes.h>
 #include <avr/io.h>
-#include <util/crc16.h>
 #include <avr/interrupt.h>
-#include <avr/wdt.h>
 #include <avr/sleep.h>
+#include <util/delay_basic.h>
 
 #define F_CPU 8000000
 #include <util/delay.h>
@@ -22,98 +20,50 @@
 #define DEVICE_IDH 0xF1
 #define DEVICE_ID ((DEVICE_IDH<<0x8) & 0xFF00 | DEVICE_IDL)
 
-#define TRANSMIT_DELAY 0x1A00
-#define TRANSMIT_GAP 0x00FF
-void inline transmit_bit(uint8_t bit)
-{
-	// Transmit the data first.
-	
-	// Set OCR0A Transmit delay
-	OCR0A = TRANSMIT_DELAY;
-	// Set Counter to zero
-	TCNT0 = 0x0000;
-	
-	// Set the output value to PB3
-	if(bit)
-	{
-		PORTB |= _BV(PORTB3); //Transmit a 1
-	}
-	else
-	{
-		PORTB &= ~_BV(PORTB3); // Transmit a 0
-	}
+#define TX_BAUD 800
 
-	// Start the counter at full clock speed
-	TCCR0B |= _BV(CS00);
+uint8_t txMode = 0;
+uint8_t txValue = 0;
+uint8_t txDone = 0;
+
+void txByte(uint8_t val)
+{
+	txValue = val;
+	txMode = 0;
+	txDone = 0;
 	
-	// wait for the timer to finish
-	set_sleep_mode(SLEEP_MODE_IDLE);
-	sleep_mode();
-	
-	// Stop the clock
-	//TCCR0B &= ~_BV(CS02) & ~_BV(CS01) & ~_BV(CS00);
-	TCCR0B &= 0xF8;
-	
-	// inserting a short gap
-	// Set OCR0A Transmit delay
-	OCR0A = TRANSMIT_GAP;
-	// Set Counter to zero
-	TCNT0 = 0x0000;
-	
-	// Gap always transmits a 0
-	PORTB &= ~_BV(PORTB3);
-	
-	// Start the counter at full clock speed
-	TCCR0B |= _BV(CS00);
-	
-	// wait for the timer to finish
-	set_sleep_mode(SLEEP_MODE_IDLE);
-	sleep_mode();
-	
-	// Stop the clock
-	//TCCR0B &= ~_BV(CS02) & ~_BV(CS01) & ~_BV(CS00);
-	TCCR0B &= 0xF8;
+	TIMSK0 = 0x02;
+	TIFR0 = 0x02;
+	OCR0A = TX_BAUD;
+	TCNT0 = TX_BAUD - 0x80;
+	TCCR0A = 0x80;
+	TCCR0B = 0x09;
+
+	for(;txMode<8;++txMode)
+	{
+		set_sleep_mode(SLEEP_MODE_IDLE);
+		sleep_mode();
+	}
+	TCCR0A = 0;
+	TCCR0B = 0;
 }
 
 ISR(TIM0_COMPA_vect)
 {
-	// this clears the interrupt flag. OCF0A
-}
-
-void transmit(uint8_t tval)
-{
-	// power up timer/counter
-	PRR &= ~_BV(PRTIM0);
-
-	// Configure Timer to be disconnected from OC0A pin.
-	TCCR0A = 0;
-	
-	// set the timer to CTC (Clear Timer on Compare) mode
-	TCCR0B = _BV(WGM02);
-
-	// enable timer/counter interrupt on compare for OCR0A register
-	TIMSK0 = _BV(OCIE0A);
-
-	// Reset interrupt flag
-	TIFR0 |= _BV(OCF0A);
-	
-	for(uint8_t i = 0;i < 8; ++i)
+	switch(txMode)
 	{
-		transmit_bit(tval & _BV(i));		
+		default:
+		if(txValue & 0x01)
+		{
+			TCCR0A = 0xC0;
+		}
+		else
+		{
+			TCCR0A = 0x80;
+		}
+		txValue = txValue>>1;
+		break;
 	}
-	
-	// Reset interrupt flag
-	TIFR0 |= _BV(OCF0A);
-	
-	// clear up the interrupts
-	TIMSK0 &= ~_BV(OCIE0A);
-	
-	// stop the timer/counter
-	TCCR0B = 0;
-	TCCR0A = 0;
-	
-	// power down timer/counter
-	PRR |= _BV(PRTIM0);
 }
 
 uint8_t getSensorValue()
@@ -162,9 +112,35 @@ ISR(WDT_vect)
 	// do nothing just wake up
 }
 
-uint8_t crc8(uint8_t crc, uint8_t data)
+static uint8_t crc8(uint8_t __crc, uint8_t __data)
 {
-	return _crc8_ccitt_update(crc, data);
+	uint8_t __i, __pattern;
+	__asm__ __volatile__ (
+	"	eor	%0, %4" "\n\t"
+	"	ldi	%1, 8" "\n\t"
+	"	ldi	%2, 0x8C" "\n\t"
+	"1:	lsr	%0" "\n\t"
+	"	brcc	2f" "\n\t"
+	"	eor	%0, %2" "\n\t"
+	"2:	dec	%1" "\n\t"
+	"	brne	1b" "\n\t"
+	: "=r" (__crc), "=d" (__i), "=d" (__pattern)
+	: "0" (__crc), "r" (__data));
+	return __crc;
+}
+
+void delay()
+{
+	uint8_t _low = 0x55; // alias %0
+	uint8_t _high = 0x55; // alias %1
+	__asm__ volatile (
+	"2: ldi %0,0x55" "\n\t"
+	"1: subi %0,1" "\n\t"
+	"brne 1b" "\n\t"
+	"subi %1,1" "\n\t"
+	"brne 2b"
+	: "=r" (_low), "=r" (_high)
+	);
 }
 
 int main(void)
@@ -249,10 +225,10 @@ int main(void)
 		crc8result = crc8(crc8result, DEVICE_IDH);
 		crc8result = crc8(crc8result, result);
 			
-		transmit(DEVICE_IDL);
-		transmit(DEVICE_IDH);
-		transmit(result);
-		transmit(crc8result);
+		txByte(DEVICE_IDL);
+		txByte(DEVICE_IDH);
+		txByte(result);
+		txByte(crc8result);
 			
 		// Turn LED off
 		PORTB &= ~_BV(PORTB2);
